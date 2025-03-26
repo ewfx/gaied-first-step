@@ -1,5 +1,9 @@
 # 🚀 Email Routing
 
+## Overview
+
+This system processes incoming emails, classifies them as "update" or "request", and stores them in MongoDB with metadata and classification results.
+
 # Core Components
 
 Python 3.11+
@@ -13,6 +17,38 @@ DistilBERT (Pre-trained NLP Model)
 Pandas (Data Handling)
 
 Scikit-learn (Metrics/Evaluation)
+
+MongoDB
+
+Pymongo
+
+Tesseract OCR
+
+Python email libraries
+
+## System Components
+
+1. **Email Ingestion** (`GenerateEmailFilesFromJSON.py`)
+
+   - Creates test email files from JSON definitions
+   - Handles attachments and duplicate emails
+
+2. **Email Processing** (`ExtractEmailContentToMongoDB.py`)
+
+   - Processes email files (EML, MSG)
+   - Extracts text from attachments (PDF, DOCX, XLSX, images)
+   - Stores structured data in MongoDB
+
+3. **Model Training** (`ModelTrainer.py`)
+
+   - Trains DistilBERT classifier on email data
+   - Supports hyperparameter tuning
+   - Evaluates model performance
+
+4. **Classification** (`ModelRunner.py`)
+   - Classifies emails using trained model
+   - Stores predictions in MongoDB
+   - Provides confidence scores
 
 ## 🎯 Approach
 
