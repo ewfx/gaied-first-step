@@ -1,6 +1,7 @@
 import os
 import random
 import logging
+import re
 from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
@@ -14,11 +15,9 @@ from transformers import (
     DataCollatorWithPadding,
 )
 from sklearn.metrics import accuracy_score
-from shutil import rmtree  # Import the rmtree function
+from shutil import rmtree
 
-# -----------------------------------------------------------------------------
 # Configure logging
-# -----------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -26,9 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("EmailClassifierTraining")
 
-# -----------------------------------------------------------------------------
 # Reproducibility: Set seeds
-# -----------------------------------------------------------------------------
 RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
@@ -38,15 +35,17 @@ if torch.cuda.is_available():
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# -----------------------------------------------------------------------------
 # Global definitions
-# -----------------------------------------------------------------------------
 MODEL_NAME = "distilbert-base-uncased"
-NUM_LABELS = 2
+NUM_LABELS = 4  # Now supporting 4 classes
 
-# -----------------------------------------------------------------------------
-# MongoDB Operations: Load emails
-# -----------------------------------------------------------------------------
+
+def extract_attachment_content(attachment):
+    """Extract text content from different attachment types"""
+    if attachment['type'] == 'msg':
+        return f"{attachment.get('subject', '')} {attachment.get('body', '')}"
+    else:
+        return attachment.get('content', '')
 
 
 def load_emails_from_mongo(
@@ -54,9 +53,7 @@ def load_emails_from_mongo(
     db_name: str = "email_routing",
     collection_name: str = "email_datasets",
 ) -> List[Dict[str, Any]]:
-    """
-    Connect to MongoDB and retrieve email documents.
-    """
+    """Connect to MongoDB and retrieve email documents."""
     try:
         client = MongoClient(uri)
         db = client[db_name]
@@ -68,53 +65,54 @@ def load_emails_from_mongo(
         logger.error(f"Error retrieving emails: {e}")
         raise
 
-# -----------------------------------------------------------------------------
-# Data Processing: Assign labels and combine text fields
-# -----------------------------------------------------------------------------
-
 
 def process_emails(emails: List[Dict[str, Any]]) -> Dict[str, List]:
-    """
-    Process emails: combine subject and body and assign label:
-       - "update" if 'is_update_case' is True
-       - "request" otherwise.
-    """
-    label_mapping = {"update": 0, "request": 1}
-    texts: List[str] = []
-    labels: List[int] = []
-    update_count = 0
-    request_count = 0
+    """Enhanced email processing with more detailed labels"""
+    label_mapping = {
+        "information_update": 0,
+        "loan_processing": 1,
+        "account_management": 2,
+        "general_inquiry": 3
+    }
+
+    texts = []
+    labels = []
+    counts = {label: 0 for label in label_mapping.keys()}
 
     for email in emails:
-        if email.get("is_update_case", False):
-            label_str = "update"
-            update_count += 1
+        subject = email.get("subject", "").lower()
+        body = email.get("body", "").lower()
+
+        # Enhanced labeling logic
+        if "update" in subject or "update" in body:
+            label_str = "information_update"
+        elif "loan" in subject or "loan" in body:
+            label_str = "loan_processing"
+        elif "account" in subject or "account" in body:
+            label_str = "account_management"
         else:
-            label_str = "request"
-            request_count += 1
+            label_str = "general_inquiry"
 
-        subject = email.get("subject", "").strip()
-        body = email.get("body", "").strip()
-        combined_text = f"{subject} {body}".strip()
-        texts.append(combined_text)
+        # Include attachments in training text
+        email_text = f"{subject} {body}"
+        for attachment in email.get("attachments", []):
+            email_text += " " + extract_attachment_content(attachment)
+
+        texts.append(email_text)
         labels.append(label_mapping[label_str])
+        counts[label_str] += 1
 
-        logger.info("Email subject: '%s' categorized as '%s'.",
-                    subject, label_str)
+        logger.info("Email categorized as '%s'", label_str)
 
-    logger.info("Categorization summary: update=%d, request=%d",
-                update_count, request_count)
+    logger.info("Categorization summary: %s", counts)
     return {"text": texts, "label": labels}
 
-# -----------------------------------------------------------------------------
-# Tokenization: Create tokenized dataset
-# -----------------------------------------------------------------------------
+
+``
 
 
-def tokenize_dataset(dataset: Dataset, tokenizer: AutoTokenizer, max_length: int = 128) -> Dataset:
-    """
-    Tokenize a Dataset using the provided tokenizer.
-    """
+def tokenize_dataset(dataset: Dataset, tokenizer: AutoTokenizer, max_length: int = 512) -> Dataset:
+    """Tokenize a Dataset using the provided tokenizer."""
     def tokenize_function(batch: Dict[str, List[str]]) -> Dict[str, Any]:
         processed_texts = [
             txt if txt.strip() else "No text available." for txt in batch["text"]]
@@ -130,10 +128,6 @@ def tokenize_dataset(dataset: Dataset, tokenizer: AutoTokenizer, max_length: int
     logger.info("Dataset tokenization complete.")
     return tokenized_dataset
 
-# -----------------------------------------------------------------------------
-# Compute evaluation metrics
-# -----------------------------------------------------------------------------
-
 
 def compute_metrics(eval_pred: Any) -> Dict[str, float]:
     logits, labels = eval_pred
@@ -141,41 +135,10 @@ def compute_metrics(eval_pred: Any) -> Dict[str, float]:
     acc = accuracy_score(labels, predictions)
     return {"accuracy": acc}
 
-# -----------------------------------------------------------------------------
-# Heuristic reasoning for misclassifications
-# -----------------------------------------------------------------------------
-
-
-def get_label_name(label: int) -> str:
-    return "update" if label == 0 else "request"
-
-
-def heuristic_reason(text: str, actual: int, predicted: int) -> str:
-    text_lower = text.lower()
-    reasons = []
-    if actual == 0 and "update" not in text_lower:
-        reasons.append("Missing 'update' keyword.")
-    elif actual == 1 and "update" in text_lower:
-        reasons.append("Contains 'update' keyword unexpectedly.")
-    if len(text.strip()) < 20:
-        reasons.append("Text is very short and ambiguous.")
-    return ", ".join(reasons) if reasons else "No obvious reason."
-
-# -----------------------------------------------------------------------------
-# Model initialization function required for hyperparameter search
-# -----------------------------------------------------------------------------
-
 
 def model_init() -> AutoModelForSequenceClassification:
-    """
-    Function to instantiate a new model.
-    Used during hyperparameter search to get fresh model instances.
-    """
+    """Function to instantiate a new model."""
     return AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=NUM_LABELS)
-
-# -----------------------------------------------------------------------------
-# Optional: Hyperparameter search with Trainer
-# -----------------------------------------------------------------------------
 
 
 def run_hyperparameter_search(trainer: Trainer, n_trials: int = 5) -> Optional[str]:
@@ -186,13 +149,9 @@ def run_hyperparameter_search(trainer: Trainer, n_trials: int = 5) -> Optional[s
     logger.info("Best trial: %s", best_trial)
     return best_trial.checkpoint if best_trial and hasattr(best_trial, "checkpoint") else None
 
-# -----------------------------------------------------------------------------
-# Main Training Pipeline
-# -----------------------------------------------------------------------------
-
 
 def main() -> None:
-    # Clear Transformers cache directory (if it exists)
+    # Clear Transformers cache directory
     cache_dir = os.path.expanduser("~/.cache/huggingface/transformers")
     if os.path.exists(cache_dir) and os.path.isdir(cache_dir):
         try:
@@ -203,7 +162,7 @@ def main() -> None:
     else:
         logger.info("Transformers cache directory not found.")
 
-    # Load emails from MongoDB.
+    # Load emails from MongoDB
     try:
         emails = load_emails_from_mongo()
     except Exception:
@@ -220,8 +179,8 @@ def main() -> None:
                 train_dataset.column_names)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    train_dataset = tokenize_dataset(train_dataset, tokenizer, max_length=128)
-    eval_dataset = tokenize_dataset(eval_dataset, tokenizer, max_length=128)
+    train_dataset = tokenize_dataset(train_dataset, tokenizer, max_length=512)
+    eval_dataset = tokenize_dataset(eval_dataset, tokenizer, max_length=512)
     logger.info("After tokenization, train dataset columns: %s",
                 train_dataset.column_names)
 
@@ -230,16 +189,16 @@ def main() -> None:
     eval_dataset.set_format(type="torch", columns=[
                             "input_ids", "attention_mask", "label"])
 
-    # MODEL INITIALIZATION: Load an existing model or create a new one.
+    # MODEL INITIALIZATION
     model_dir = "email_classifier_llm_latest"
     choice = input(
         f"Load an existing model from '{model_dir}'? (y/n): ").strip().lower()
-    if choice == "y" and os.path.exists(model_dir):
+    if choice == 'y' and os.path.exists(model_dir):
         logger.info("Loading existing model from: %s", model_dir)
         model = AutoModelForSequenceClassification.from_pretrained(
             model_dir, num_labels=NUM_LABELS)
     else:
-        if choice == "y":
+        if choice == 'y':
             logger.warning(
                 "No model found at '%s'. Creating a new model.", model_dir)
         else:
@@ -249,7 +208,6 @@ def main() -> None:
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
     training_args = TrainingArguments(
         output_dir="output_llm",
-        # Using eval_strategy instead of evaluation_strategy.
         eval_strategy="epoch",
         save_strategy="epoch",
         learning_rate=2e-5,
@@ -263,7 +221,6 @@ def main() -> None:
         load_best_model_at_end=True,
     )
 
-    # Initialize Trainer with model_init so hyperparameter search can create new instances.
     trainer = Trainer(
         model_init=model_init,
         args=training_args,
@@ -274,7 +231,7 @@ def main() -> None:
         compute_metrics=compute_metrics,
     )
 
-    # Optional hyperparameter search.
+    # Optional hyperparameter search
     best_checkpoint = run_hyperparameter_search(trainer, n_trials=3)
     if best_checkpoint:
         logger.info("Resuming training from best checkpoint: %s",
@@ -292,41 +249,6 @@ def main() -> None:
     model.save_pretrained(model_dir)
     tokenizer.save_pretrained(model_dir)
     logger.info("Model and tokenizer saved to '%s'.", model_dir)
-
-    # Post-training analysis of misclassifications.
-    predictions_output = trainer.predict(eval_dataset)
-    logits = predictions_output.predictions
-    predicted_labels = np.argmax(logits, axis=-1)
-    true_labels = raw_eval_dataset["label"]
-    texts = raw_eval_dataset["text"]
-
-    misclassified = []
-    for i in range(len(true_labels)):
-        if predicted_labels[i] != true_labels[i]:
-            reason = heuristic_reason(
-                texts[i], true_labels[i], predicted_labels[i])
-            misclassified.append({
-                "text_snippet": texts[i][:200],
-                "actual": get_label_name(true_labels[i]),
-                "predicted": get_label_name(predicted_labels[i]),
-                "reason": reason,
-            })
-
-    accuracy = accuracy_score(true_labels, predicted_labels)
-    logger.info("Post-training Accuracy on evaluation set: %.2f%%",
-                accuracy * 100)
-    print(f"Evaluation Accuracy: {accuracy * 100:.2f}%")
-
-    if misclassified:
-        logger.info("Misclassified examples:")
-        for idx, mis in enumerate(misclassified, start=1):
-            print(f"--- Misclassified Example {idx} ---")
-            print(f"Text Snippet: {mis['text_snippet']}")
-            print(
-                f"Actual Label: {mis['actual']}, Predicted Label: {mis['predicted']}")
-            print(f"Heuristic Reason: {mis['reason']}\n")
-    else:
-        logger.info("No misclassifications found on evaluation data.")
 
 
 if __name__ == "__main__":
