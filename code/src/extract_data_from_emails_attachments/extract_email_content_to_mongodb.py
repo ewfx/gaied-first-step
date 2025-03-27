@@ -18,8 +18,8 @@ pytesseract.pytesseract.tesseract_cmd = r"./resources/tesseract.exe"
 
 # MongoDB Configuration
 MONGO_CONNECTION_STRING = "mongodb://localhost:27017/"
-DB_NAME = "email_routing"
-COLLECTION_NAME = "email_datasets"
+DB_NAME = "emails_train_db30"
+COLLECTION_NAME = "emails_train30"
 
 
 def extract_text_from_image(image_bytes):
