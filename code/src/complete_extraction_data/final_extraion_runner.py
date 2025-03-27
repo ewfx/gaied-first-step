@@ -157,11 +157,11 @@ def main():
     """Main processing function"""
     # Connect to MongoDB
     client = MongoClient("mongodb://localhost:27017")
-    db = client["email_routing"]
-    collection = db["email_datasets"]
+    db = client["emails_train_db30"]
+    collection = db["emails_train30"]
 
     # Process each email document
-    for doc in collection.find():
+    for doc in collection.find({"is_duplicate": False}):
         try:
             analysis_result = analyze_email(doc)
 
